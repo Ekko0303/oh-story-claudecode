@@ -226,10 +226,14 @@ cat > "$root/book/追踪/上下文.md" <<'CTX'
 - 章: 第1章
 CTX
 touch "$root/拆文库/sample/_progress.md"
+# 负向 fixture：已拆完的书不得再被报成「未完成」（裸数 _progress.md 会永久误报）。
+mkdir -p "$root/拆文库/done"
+printf '# 深度拆解进度：done\n\n- 最终状态：completed\n- schema_version: 2\n' > "$root/拆文库/done/_progress.md"
 
 out_start="$(run_from_nested "$root" session-start.sh || true)"
 echo "$out_start" | grep -q '当前位置' || fail "session-start did not resolve active book from project root"
 echo "$out_start" | grep -q '未完成拆文' || fail "session-start did not resolve 拆文库 from project root"
+echo "$out_start" | grep -q '有 1 个未完成拆文' || fail "session-start counted completed 拆文 as unfinished"
 if echo "$out_start" | grep -q '参考资料包缺失'; then
   fail "session-start reported missing reference bundle after deployed refs were copied"
 fi
@@ -243,6 +247,11 @@ echo "$out_post" | grep -q 'Read book/追踪/上下文.md' || fail "post-compact
 out_gaps="$(run_from_nested "$root" detect-story-gaps.sh || true)"
 if [ -n "$out_gaps" ] && echo "$out_gaps" | grep -q "$root/nested"; then
   fail "detect-story-gaps leaked nested cwd paths"
+fi
+# 与 session-start 同口径：未完成的要报、已完成的不许报（两边各自读取 拆文库/，需各自钉死）。
+echo "$out_gaps" | grep -q '拆文未完成：拆文库/sample/_progress.md' || fail "detect-story-gaps missed unfinished 拆文"
+if echo "$out_gaps" | grep -q '拆文库/done/_progress.md'; then
+  fail "detect-story-gaps counted completed 拆文 as unfinished"
 fi
 
 fallback_root="$TMP_DIR/git-fallback"
