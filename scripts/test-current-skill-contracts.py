@@ -649,6 +649,116 @@ def test_p1_deletion_guards() -> None:
             )
 
 
+def test_analyze_portability_guards() -> None:
+    """Stage 6 的样本路径与 Stage 0 的目录块剔除都必须留在文档里。
+
+    两者都只在真实运行时才暴露：/tmp 绝对路径要探到 Windows 原生 python 才炸，
+    目录块要原文自带目录才多切一遍章。守卫是它们唯一的回归网。
+    """
+
+    rule = next(
+        r for r in VALIDATOR.LEGACY_RULES if r.code == "analyze-posix-tmp-sample-path"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = root / "skills/story-long-analyze/references/style-profile-generator.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("把 3 段拼接写入 `/tmp/style-sample.txt`。\n", encoding="utf-8")
+        require(
+            finding_codes(VALIDATOR.check_absent_rule(root, rule))
+            == {"analyze-posix-tmp-sample-path"},
+            "the POSIX /tmp sample path must be rejected",
+        )
+        path.write_text(
+            "把 3 段拼接写入 `拆文库/{书名}/_style-sample.txt`。\n", encoding="utf-8"
+        )
+        require(
+            not VALIDATOR.check_absent_rule(root, rule),
+            "a project-relative sample path must be accepted",
+        )
+
+    stage0_cases = (
+        (r"先剔掉目录块", "stage0-toc-block-removal"),
+        (r"落表前校验章号连续", "stage0-chapter-table-validation"),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = Path(tmp) / "SKILL.md"
+        fixture.write_text("- grep 出全部章节行号\n", encoding="utf-8")
+        for pattern, code in stage0_cases:
+            require(
+                finding_codes(VALIDATOR.require_pattern(fixture, pattern, code, code))
+                == {code},
+                "{} must fire when Stage 0 drops the rule".format(code),
+            )
+        fixture.write_text(
+            "- **先剔掉目录块**：按行距丢弃开头的目录命中\n"
+            "- 落表前校验章号连续、无重复、无跳号\n",
+            encoding="utf-8",
+        )
+        for pattern, code in stage0_cases:
+            require(
+                not VALIDATOR.require_pattern(fixture, pattern, code, code),
+                "{} must accept the documented Stage 0 contract".format(code),
+            )
+
+
+def test_rubric_parity_guard() -> None:
+    """两份通用 rubric 必须同维度；两边都读不到时不能算通过。"""
+
+    rubric = (
+        "## 核心维度\n\n"
+        "| 维度 | PASS | WARN | FAIL |\n"
+        "|---|---|---|---|\n"
+        "| 核心卖点 | a | b | c |\n"
+        "| 标点节奏 | a | b | c |\n"
+        "\n## 发布建议门槛\n\n"
+        "| 综合情况 | Verdict |\n"
+        "|---|---|\n"
+        "| 无 S1/S2 | PASS |\n"
+    )
+    embedded = "通用网文内容 rubric：\n- 核心卖点：x\n- 标点节奏：y\n\nAI 味 fallback：\n"
+
+    def build(root: Path, rubric_body: str, skill_body: str) -> None:
+        r = root / "skills/story-review/references/quality-rubric.md"
+        s = root / "skills/story-review/SKILL.md"
+        r.parent.mkdir(parents=True, exist_ok=True)
+        r.write_text(rubric_body, encoding="utf-8")
+        s.write_text(skill_body, encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        build(root, rubric, embedded)
+        require(
+            not VALIDATOR.rubric_parity_findings(root),
+            "matching rubric dimensions must pass",
+        )
+        # 发布门槛表不是维度表，不能被算进来
+        table, _ = VALIDATOR.rubric_dimension_names(root)
+        require(
+            table == ["核心卖点", "标点节奏"],
+            "only the 核心维度 table counts, got {}".format(table),
+        )
+
+        build(root, rubric.replace("| 标点节奏 |", "| 标点节奏X |", 1), embedded)
+        require(
+            finding_codes(VALIDATOR.rubric_parity_findings(root)) == {"rubric-dimension-drift"},
+            "a dimension present only in the embedded fallback must fail",
+        )
+
+        build(root, rubric, embedded.replace("- 标点节奏：y\n", "", 1))
+        require(
+            finding_codes(VALIDATOR.rubric_parity_findings(root)) == {"rubric-dimension-drift"},
+            "a dimension present only in the file must fail",
+        )
+
+        # 整块删掉时两边都是空列表——空集相等，必须显式拦成读取失败而不是静默通过
+        build(root, rubric, "没有内置 rubric 了\n")
+        require(
+            finding_codes(VALIDATOR.rubric_parity_findings(root)) == {"rubric-parity-unreadable"},
+            "a missing embedded rubric must not pass vacuously",
+        )
+
+
 def main() -> int:
     test_manifest_contract()
     test_bad_fallbacks_fail()
@@ -663,6 +773,8 @@ def main() -> int:
     test_spawn_preflight_uses_agents_version_not_file_existence()
     test_reviewed_benchmark_wording_stays_removed()
     test_p1_deletion_guards()
+    test_analyze_portability_guards()
+    test_rubric_parity_guard()
     test_structured_sentinel_contract()
     test_structured_outline_contract()
     test_upgrading_version_contract()
